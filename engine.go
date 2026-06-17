@@ -130,15 +130,39 @@ func (e *IBusBambooEngine) FocusIn() *dbus.Error {
 
 func (e *IBusBambooEngine) FocusOut() *dbus.Error {
 	log.Print("FocusOut.")
+	if e.checkInputMode(config.PreeditIM) {
+		e.Lock()
+		e.preeditor.Reset()
+		e.resetFakeBackspace()
+		e.Unlock()
+	}
 	return nil
 }
 
 func (e *IBusBambooEngine) Reset() *dbus.Error {
 	fmt.Print("Reset.\n")
 	if e.checkInputMode(config.PreeditIM) {
+		// In PreeditIM the in-progress text is ephemeral (managed by
+		// IBus preedit), so discard it on Reset.
+		e.HidePreeditText()
+		e.HideAuxiliaryText()
+		e.Lock()
 		e.preeditor.Reset()
+		e.resetFakeBackspace()
+		e.Unlock()
 	}
-	return nil
+	// Drain any queued keystrokes so stale events from the old
+	// context don't apply to the new one.  Safe for all modes.
+	// Non-blocking: other goroutines (the worker, updatePreviousTextInBatch)
+	// also receive from keyPressChan, so a plain len()>0 + <- would block
+	// the D-Bus thread if one of them drains the last item first.
+	for {
+		select {
+		case <-keyPressChan:
+		default:
+			return nil
+		}
+	}
 }
 
 func (e *IBusBambooEngine) Enable() *dbus.Error {

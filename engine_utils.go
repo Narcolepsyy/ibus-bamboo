@@ -132,13 +132,27 @@ var sleep = func() {
 }
 
 func (e *IBusBambooEngine) resetBuffer() {
-	if e.getRawKeyLen() == 0 {
-		return
-	}
 	if e.checkInputMode(config.PreeditIM) {
-		e.commitPreeditAndReset(e.getPreeditString())
+		// commitPreeditAndReset makes D-Bus calls, so we read the
+		// preedit string under lock but call commitPreeditAndReset
+		// without it (commitPreeditAndReset resets the preeditor
+		// internally under its own flow). The empty-buffer guard must
+		// also run under the lock, otherwise it races with the worker
+		// goroutine mutating the preeditor.
+		e.Lock()
+		if e.getRawKeyLen() == 0 {
+			e.Unlock()
+			return
+		}
+		var preeditStr = e.getPreeditString()
+		e.Unlock()
+		e.commitPreeditAndReset(preeditStr)
 	} else {
-		e.preeditor.Reset()
+		e.Lock()
+		if e.getRawKeyLen() > 0 {
+			e.preeditor.Reset()
+		}
+		e.Unlock()
 	}
 }
 

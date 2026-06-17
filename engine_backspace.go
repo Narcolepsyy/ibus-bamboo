@@ -32,11 +32,14 @@ import (
 )
 
 const BACKSPACE_INTERVAL = 0
+const maxBackSpacePerCycle = 50
 
 func (e *IBusBambooEngine) bsProcessKeyEvent(keyVal uint32, keyCode uint32, state uint32) (bool, *dbus.Error) {
 	if isMovementKey(keyVal) {
+		e.Lock()
 		e.preeditor.Reset()
 		e.resetFakeBackspace()
+		e.Unlock()
 		e.isSurroundingTextReady = true
 		return false, nil
 	}
@@ -44,12 +47,14 @@ func (e *IBusBambooEngine) bsProcessKeyEvent(keyVal uint32, keyCode uint32, stat
 	if e.config.IBflags&config.IBmacroEnabled == 0 && len(keyPressChan) == 0 && e.getRawKeyLen() == 0 && !inKeyList(e.preeditor.GetInputMethod().AppendingKeys, keyRune) {
 		e.updateLastKeyWithShift(keyVal, state)
 		if e.preeditor.CanProcessKey(keyRune) && isValidState(state) {
+			e.Lock()
 			e.isFirstTimeSendingBS = true
 			if state&IBusLockMask != 0 {
 				keyRune = e.toUpper(keyRune)
 			}
 			e.preeditor.ProcessKey(keyRune, bamboo.VietnameseMode)
 			e.bsCommitText([]rune(e.getPreeditString()))
+			e.Unlock()
 			return true, nil
 		}
 		return false, nil
@@ -64,25 +69,31 @@ func (e *IBusBambooEngine) bsProcessKeyEvent(keyVal uint32, keyCode uint32, stat
 					return false, nil
 				} else {
 					sleep()
+					e.Lock()
 					if e.getRawKeyLen() > 0 {
 						if e.shouldFallbackToEnglish(true) {
 							e.preeditor.RestoreLastWord(false)
 						}
 						e.preeditor.RemoveLastChar(false)
 					}
+					e.Unlock()
 				}
 				return false, nil
 			}
 			if keyVal == IBusTab {
 				sleep()
+				e.Lock()
 				if ok, _ := e.getMacroText(); !ok {
 					e.preeditor.Reset()
+					e.Unlock()
 					return false, nil
 				}
+				e.Unlock()
 			}
 			isValidKey := isValidState(state) && e.isValidKeyVal(keyVal)
 			if !isValidKey {
 				sleep()
+				// keyPressHandler takes its own lock
 				return e.keyPressHandler(keyVal, keyCode, state), nil
 			}
 		}
@@ -91,6 +102,7 @@ func (e *IBusBambooEngine) bsProcessKeyEvent(keyVal uint32, keyCode uint32, stat
 		keyPressChan <- [3]uint32{keyVal, keyCode, state}
 		return true, nil
 	} else {
+		// keyPressHandler takes its own lock
 		return e.keyPressHandler(keyVal, keyCode, state), nil
 	}
 }
@@ -104,6 +116,8 @@ func (e *IBusBambooEngine) keyPressForwardHandler(keyVal, keyCode, state uint32)
 
 func (e *IBusBambooEngine) keyPressHandler(keyVal, keyCode, state uint32) bool {
 	// log.Printf(">>Backspace:ProcessKeyEvent >  %c | keyCode 0x%04x keyVal 0x%04x | %d\n", rune(keyVal), keyCode, keyVal, len(keyPressChan))
+	e.Lock()
+	defer e.Unlock()
 	defer e.updateLastKeyWithShift(keyVal, state)
 	if e.keyPressDelay > 0 {
 		time.Sleep(time.Duration(e.keyPressDelay) * time.Millisecond)
@@ -265,6 +279,14 @@ func (e *IBusBambooEngine) getOffsetRunes(newText, oldText string) ([]rune, int)
 }
 
 func (e *IBusBambooEngine) SendBackSpace(n int) {
+	// Guard: clamp to prevent runaway backspaces from a desync.
+	if n <= 0 {
+		return
+	}
+	if n > maxBackSpacePerCycle {
+		log.Printf("WARNING: SendBackSpace(%d) clamped to %d\n", n, maxBackSpacePerCycle)
+		n = maxBackSpacePerCycle
+	}
 	// Gtk/Qt apps have a serious sync issue with fake backspaces
 	// and normal string committing, so we'll not commit right now
 	// but delay until all the sent backspaces got processed.
@@ -321,6 +343,9 @@ func (e *IBusBambooEngine) SendBackSpace(n int) {
 	} else {
 		fmt.Println("There's something wrong with wmClasses")
 	}
+	// Reset fake-backspace counter after each send cycle so a dropped
+	// synthetic backspace can't leave a permanent offset.
+	e.resetFakeBackspace()
 }
 
 func (e *IBusBambooEngine) resetFakeBackspace() {
